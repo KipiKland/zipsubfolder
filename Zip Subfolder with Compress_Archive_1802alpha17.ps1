@@ -101,11 +101,11 @@
 param(
     [Parameter()]
     [ValidateNotNullOrEmpty()]
-    [string] $ShpDomain = "https://ing.sharepoint.com",
+    [string] $ShpDomain = "https://xxx.sharepoint.com",
 
     [Parameter()]
     [ValidateNotNullOrEmpty()]
-    [string] $Site = "/sites/GRCH000062_FS", # site-relative for consistency
+    [string] $Site = "/sites/xxxxx", # site-relative for consistency
 
     [Parameter()]
     [ValidateNotNullOrEmpty()]
