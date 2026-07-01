@@ -1,4 +1,3 @@
-$scriptVersion = "1802alpha19"
 <#
 .SYNOPSIS
     Zip SharePoint subfolders from a target library folder, upload ZIP back, log history, and delete the original folders.
@@ -18,13 +17,12 @@ $scriptVersion = "1802alpha19"
 
 .CHANGELOG
 
-    1802alpha19 / 01.07.2026
-      - CHANGE alpha19: $TempRoot is now created automatically if it does not exist instead of aborting the run.
-      - CHANGE alpha19: option D now proposes an optional merge after duplicate ZIP detection.
-      - CHANGE alpha19: option D can merge all duplicate ZIP groups in one selected root folder, or all duplicate ZIP groups across every scanned root folder.
-      - CHANGE alpha19: duplicate ZIP merge supports more than two ZIPs per reference.
-      - CHANGE alpha19: before uploading a ZIP, the script re-checks destination ZIPs and skips/logs the action if an unexpected ZIP with the same 6-digit reference or destination name already exists.
+    1802alpha19 WISH LIST
+     - Create Temp folder ($TempRoot) if folder does not exist.
+     - Propose to merge duplicate folders even they are more than 2 per reference
+     - Propose to move subfolder falling outside of folder range.
 
+     
     1802alpha18 / 17.06.2026
       - CHANGE alpha17: added menu option C to check that uncompressed folders and already-compressed ZIP files are stored in the correct 6-digit range folder.
       - CHANGE alpha17: option C is display-only: it does not download, upload, delete or write the detected placement issues to any log file.
@@ -103,15 +101,14 @@ $scriptVersion = "1802alpha19"
     #$env:PNPPOWERSHELL_UPDATECHECK = "OFF"
 #>
 
-
 param(
     [Parameter()]
     [ValidateNotNullOrEmpty()]
-    [string] $ShpDomain = "https://xxx.sharepoint.com"
+    [string] $ShpDomain = "https://ing.sharepoint.com",
 
     [Parameter()]
     [ValidateNotNullOrEmpty()]
-    [string] $Site ="/sites/GRCH000062_FS" # site-relative for consistency
+    [string] $Site = "/sites/GRCH000062_FS", # site-relative for consistency
 
     [Parameter()]
     [ValidateNotNullOrEmpty()]
@@ -131,28 +128,23 @@ param(
 
     [switch] $ProcessAll,  # If set, skips the interactive prompt and processes all root folders
     [switch] $Quiet        # If set, less console output (log still complete)
-    )
+)
 
 begin {
     # ---- SETTINGS / GLOBALS ----
     $ErrorActionPreference = 'Stop'
     $ProgressPreference    = 'SilentlyContinue'  # speeds up lots of cmdlet calls
     $env:PNPPOWERSHELL_UPDATECHECK = "OFF"
-    $scriptVersion = "1802alpha19"   # CHANGE alpha19: option D duplicate ZIP merge + safer temp/upload guards
+    $scriptVersion = "1802alpha18"   # CHANGE alpha17: add display-only placement check menu option C
     $ConflictMode = 'LatestWins'
     $dbg = $false
     $SiteUrl = "$ShpDomain$Site"
     $FolderSiteRelativeURL = "$DocLib$DocFolder"                 # site-relative: "/Shared Documents/_Archived Files"
     $FolderServerRelativeURL = "$Site$FolderSiteRelativeURL"     # server-relative: "/sites/.../Shared Documents/_Archived Files"
 
-    # temp structure: create the temp root if missing, then a per-run folder
+    # temp structure: create a per-run folder
     if (-not (Test-Path -LiteralPath $TempRoot)) {
-        try {
-            New-Item -ItemType Directory -Path $TempRoot -Force | Out-Null
-        }
-        catch {
-            throw "Temp root '$TempRoot' does not exist and could not be created. Aborting. $($_.Exception.Message)"
-        }
+        throw "Temp root '$TempRoot' does not exist. Aborting."
     }
     
     #$runStamp = Get-Date -Format "yyyyMMdd_HHmmss"
@@ -791,436 +783,6 @@ process
         }
     }
 
-    function Get-PnPItemServerRelativeUrl {
-        param(
-            [Parameter(Mandatory)] $Item,
-            [Parameter(Mandatory)] [string] $FallbackUrl
-        )
-
-        foreach ($propName in @('ServerRelativeUrl','ServerRelativeURL')) {
-            if ($Item.PSObject.Properties.Match($propName).Count -gt 0) {
-                $value = [string]$Item.PSObject.Properties[$propName].Value
-                if (-not [string]::IsNullOrWhiteSpace($value)) { return $value }
-            }
-        }
-        return $FallbackUrl
-    }
-
-    function Get-DuplicateZipReferenceRows {
-        param(
-            [Parameter(Mandatory)] [object[]] $RootFolders,
-            [Parameter(Mandatory)] [string] $FolderSiteRelativeURL,
-            [Parameter(Mandatory)] [string] $FolderServerRelativeURL,
-            [Parameter(Mandatory)] $Connection,
-            [Parameter(Mandatory)] [string] $LogFolderName
-        )
-
-        Write-Host "Scanning range folders for duplicate ZIP references (per folder, consolidated output)..." -ForegroundColor Cyan
-
-        $scanFolders = @($RootFolders | Where-Object { $_ -and $_.Name -and $_.Name -ne $LogFolderName })
-        $rangeLike = @($scanFolders | Where-Object { $_.Name -match '^\d{6}\s*-\s*\d{6}$' })
-        if ($rangeLike.Count -gt 0) { $scanFolders = $rangeLike }
-
-        Write-log ("Option D: {0} folder(s) to scan (from rootfolds)" -f $scanFolders.Count) -ToConsole
-
-        $dupRows = New-Object System.Collections.Generic.List[object]
-
-        foreach ($rf in $scanFolders) {
-            $rangeName = $rf.Name
-            $subrooturl = "$FolderSiteRelativeURL/$rangeName"
-
-            try {
-                $filesAtRoot = @(Get-PnPFolderItem -FolderSiteRelativeUrl $subrooturl -ItemType File -Connection $Connection -ErrorAction Stop)
-            }
-            catch {
-                Write-log ("Option D: Cannot enumerate files in {0} - {1}" -f $subrooturl, $_.Exception.Message) -Severity WARN -ToConsole
-                continue
-            }
-
-            $subZipItems = @($filesAtRoot | Where-Object { $_.Name -match '(?i)\.zip$' })
-            $zipIndex = @{}
-            $zipNoRef = @()
-
-            foreach ($z in $subZipItems) {
-                $ref = Get-SixDigitReference -Name $z.Name
-                if (-not [string]::IsNullOrWhiteSpace($ref)) {
-                    if (-not $zipIndex.ContainsKey($ref)) { $zipIndex[$ref] = @() }
-                    $zipIndex[$ref] += $z
-                }
-                else {
-                    $zipNoRef += $z
-                }
-            }
-
-            if ($dbg) {
-                Write-log ("Option D: [{0}] ZIP inventory: {1} zip(s) at root, {2} distinct ref(s), {3} zip(s) without 6-digit ref" -f $rangeName, $subZipItems.Count, $zipIndex.Keys.Count, $zipNoRef.Count) -ToConsole
-            }
-
-            foreach ($k in $zipIndex.Keys) {
-                if ($zipIndex[$k].Count -gt 1) {
-                    foreach ($zz in $zipIndex[$k]) {
-                        $fallback = "$FolderServerRelativeURL/$rangeName/$($zz.Name)"
-                        $sr = Get-PnPItemServerRelativeUrl -Item $zz -FallbackUrl $fallback
-
-                        $dupRows.Add([pscustomobject]@{
-                            RangeFolder       = $rangeName
-                            Ref               = $k
-                            ZipName           = $zz.Name
-                            ServerRelativeUrl = $sr
-                            ZipItem           = $zz
-                        }) | Out-Null
-                    }
-                }
-            }
-        }
-
-        return @($dupRows)
-    }
-
-    function Write-DuplicateZipReferenceReport {
-        param(
-            [Parameter(Mandatory)] [object[]] $DuplicateRows
-        )
-
-        if ($DuplicateRows.Count -eq 0) {
-            Write-Host "No duplicate ZIP references found in any scanned folder." -ForegroundColor Green
-            return
-        }
-
-        $groups = @($DuplicateRows | Group-Object RangeFolder, Ref)
-        Write-Host ("Duplicate ZIP references detected (groups): {0}" -f $groups.Count) -ForegroundColor Yellow
-
-        foreach ($g in ($groups | Sort-Object Name)) {
-            $folder = $g.Group[0].RangeFolder
-            $ref    = $g.Group[0].Ref
-            Write-log ("WARNING: {0} ZIPs found for ref {1} in folder {2}:" -f $g.Count, $ref, $folder) -ToConsole -Severity WARN
-            foreach ($row in ($g.Group | Sort-Object ZipName)) {
-                Write-log (" - {0}" -f $row.ZipName) -ToConsole -Severity WARN
-            }
-        }
-    }
-
-    function Export-DuplicateZipReferenceCsv {
-        param(
-            [Parameter(Mandatory)] [object[]] $DuplicateRows,
-            [Parameter(Mandatory)] [string] $RunTemp
-        )
-
-        if ($DuplicateRows.Count -eq 0) { return }
-
-        try {
-            if (-not (Test-Path -LiteralPath $RunTemp)) { New-Item -ItemType Directory -Path $RunTemp -Force | Out-Null }
-            $csvPath = Join-Path $RunTemp ("DuplicateZipRefs_{0}.csv" -f (Get-Date -Format 'yyyyMMdd_HHmmss'))
-            $DuplicateRows |
-                Select-Object RangeFolder, Ref, ZipName, ServerRelativeUrl |
-                Sort-Object RangeFolder, Ref, ZipName |
-                Export-Csv -Path $csvPath -NoTypeInformation -Encoding UTF8
-            Write-Host ("CSV exported to: {0}" -f $csvPath) -ForegroundColor Cyan
-        }
-        catch {
-            Write-log "Option D: Could not export CSV - $($_.Exception.Message)" -Severity WARN -ToConsole
-        }
-    }
-
-    function Select-DuplicateZipMergeOutputName {
-        param(
-            [Parameter(Mandatory)] [string] $RangeFolder,
-            [Parameter(Mandatory)] [string] $RefNumber,
-            [Parameter(Mandatory)] [object[]] $MatchingZips,
-            [switch] $NonInteractive
-        )
-
-        $candidates = New-Object System.Collections.Generic.List[string]
-        foreach ($z in ($MatchingZips | Sort-Object Name)) {
-            if (-not $candidates.Contains($z.Name)) { $candidates.Add($z.Name) | Out-Null }
-        }
-
-        if ($candidates.Count -eq 0) { throw "No ZIP candidate available for duplicate merge." }
-
-        if ($NonInteractive) {
-            Write-log ("Duplicate ZIP merge running non-interactively. Default final ZIP name: {0}" -f $candidates[0]) -Severity WARN -ToConsole
-            return $candidates[0]
-        }
-
-        Write-Host ''
-        Write-Host ("Duplicate ZIP merge for folder '{0}', reference {1}. Choose the FINAL merged ZIP name:" -f $RangeFolder,$RefNumber) -ForegroundColor Cyan
-        Write-Host "Only existing duplicate ZIP names are proposed, to avoid overwriting an unrelated destination file." -ForegroundColor Gray
-        for ($i = 0; $i -lt $candidates.Count; $i++) {
-            Write-Host ("  {0} = {1}" -f ($i + 1), $candidates[$i]) -ForegroundColor Gray
-        }
-
-        $selection = Read-Host ("Enter a number between 1 and {0}. Press Enter for default (1). Enter S to skip this group" -f $candidates.Count)
-        if ([string]::IsNullOrWhiteSpace($selection)) { $selection = '1' }
-        if ($selection -match '^[sS]$') { return $null }
-
-        if (($selection -notmatch '^\d+$') -or ([int]$selection -lt 1) -or ([int]$selection -gt $candidates.Count)) {
-            Write-log ("Invalid duplicate ZIP merge selection '{0}'. Skipping ref {1} in folder {2}." -f $selection,$RefNumber,$RangeFolder) -Severity WARN -ToConsole
-            return $null
-        }
-
-        $chosenName = $candidates[[int]$selection - 1]
-        Write-log ("Final merged ZIP name selected for ref {0} in folder {1}: {2}" -f $RefNumber,$RangeFolder,$chosenName) -Severity INFO -ToConsole
-        return $chosenName
-    }
-
-    function Test-DestinationZipUploadSafe {
-        param(
-            [Parameter(Mandatory)] [string] $FolderSiteRelativeUrl,
-            [Parameter(Mandatory)] [string] $ServerRelativeSubRoot,
-            [Parameter(Mandatory)] [string] $ZipFileName,
-            [Parameter(Mandatory)] [string] $RefNumber,
-            [Parameter()] [string[]] $ExpectedExistingZipNames = @(),
-            [Parameter(Mandatory)] $Connection,
-            [switch] $Sub
-        )
-
-        $expected = @($ExpectedExistingZipNames | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
-
-        try {
-            $filesAtRoot = @(Get-PnPFolderItem -FolderSiteRelativeUrl $FolderSiteRelativeUrl -ItemType File -Connection $Connection -ErrorAction Stop)
-        }
-        catch {
-            Write-log ("[REF {0}] Could not re-check destination ZIP inventory before upload to {1}. Skipping upload. Error: {2}" -f $RefNumber,$FolderSiteRelativeUrl,$_.Exception.Message) -Severity WARN -ToConsole -Sub:$Sub
-            return $false
-        }
-
-        $zipItems = @($filesAtRoot | Where-Object { $_.Name -match '(?i)\.zip$' })
-        $exactNameCollisions = @($zipItems | Where-Object { $_.Name -eq $ZipFileName -and ($expected -notcontains $_.Name) })
-        if ($exactNameCollisions.Count -gt 0) {
-            foreach ($collision in $exactNameCollisions) {
-                Write-log ("[REF {0}] SKIP upload: destination ZIP name already exists and was not part of the planned merge/update set: {1}" -f $RefNumber,$collision.Name) -Severity WARN -ToConsole -Sub:$Sub
-            }
-            return $false
-        }
-
-        $sameRefUnexpected = @($zipItems | Where-Object {
-            $existingRef = Get-SixDigitReference -Name $_.Name
-            ($existingRef -eq $RefNumber) -and ($expected -notcontains $_.Name)
-        })
-
-        if ($sameRefUnexpected.Count -gt 0) {
-            Write-log ("[REF {0}] SKIP upload: unexpected destination ZIP(s) with the same reference already exist. No overwrite/merge/delete will be attempted." -f $RefNumber) -Severity WARN -ToConsole -Sub:$Sub
-            foreach ($collision in ($sameRefUnexpected | Sort-Object Name)) {
-                $fallback = "$ServerRelativeSubRoot/$($collision.Name)"
-                $sr = Get-PnPItemServerRelativeUrl -Item $collision -FallbackUrl $fallback
-                Write-log ("[REF {0}] Blocking destination ZIP: {1} | {2}" -f $RefNumber,$collision.Name,$sr) -Severity WARN -ToConsole -Sub:$Sub
-            }
-            return $false
-        }
-
-        return $true
-    }
-
-    function Invoke-DuplicateZipGroupMerge {
-        param(
-            [Parameter(Mandatory)] [object[]] $DuplicateRows,
-            [Parameter(Mandatory)] [string] $FolderSiteRelativeURL,
-            [Parameter(Mandatory)] [string] $FolderServerRelativeURL,
-            [Parameter(Mandatory)] [string] $RunTemp,
-            [Parameter(Mandatory)] $Connection,
-            [Parameter(Mandatory)] [ValidateSet('LatestWins','Rename','Fail')] [string] $ConflictMode,
-            [switch] $NonInteractive
-        )
-
-        if ($DuplicateRows.Count -lt 2) {
-            return [pscustomobject]@{ Status='Skipped'; Reason='Less than two ZIPs'; RangeFolder=''; Ref=''; FinalZip='' }
-        }
-
-        $rangeName = [string]$DuplicateRows[0].RangeFolder
-        $refNumber = [string]$DuplicateRows[0].Ref
-        $subrooturl = "$FolderSiteRelativeURL/$rangeName"
-        $serverRelativeSubRoot = "$FolderServerRelativeURL/$rangeName"
-        $matchingZips = @($DuplicateRows | Sort-Object ZipName | ForEach-Object { $_.ZipItem })
-        $expectedZipNames = @($matchingZips | ForEach-Object { $_.Name })
-
-        Write-log ("Option D merge: processing {0} duplicate ZIP(s) for ref {1} in folder {2}." -f $matchingZips.Count,$refNumber,$rangeName) -Severity WARN -ToConsole
-
-        $canonicalZipName = Select-DuplicateZipMergeOutputName -RangeFolder $rangeName -RefNumber $refNumber -MatchingZips $matchingZips -NonInteractive:$NonInteractive
-        if ([string]::IsNullOrWhiteSpace($canonicalZipName)) {
-            Write-log ("Option D merge: skipped by user for ref {0} in folder {1}." -f $refNumber,$rangeName) -Severity WARN -ToConsole
-            return [pscustomobject]@{ Status='Skipped'; Reason='Skipped by user'; RangeFolder=$rangeName; Ref=$refNumber; FinalZip='' }
-        }
-
-        if (-not (Test-DestinationZipUploadSafe -FolderSiteRelativeUrl $subrooturl -ServerRelativeSubRoot $serverRelativeSubRoot -ZipFileName $canonicalZipName -RefNumber $refNumber -ExpectedExistingZipNames $expectedZipNames -Connection $Connection)) {
-            Write-log ("Option D merge: skipped ref {0} in folder {1} because destination changed or contains an unexpected ZIP collision." -f $refNumber,$rangeName) -Severity WARN -ToConsole
-            return [pscustomobject]@{ Status='Skipped'; Reason='Destination collision'; RangeFolder=$rangeName; Ref=$refNumber; FinalZip=$canonicalZipName }
-        }
-
-        $workPaths = New-CompactWorkPaths -RunTemp $RunTemp -RefNumber $refNumber -SeedText ("OptionD|{0}|{1}" -f $rangeName,$refNumber)
-        foreach ($p in @($workPaths.JobRoot,$workPaths.SourceRoot,$workPaths.ZipRoot,$workPaths.MergeRoot)) {
-            if (Test-Path -LiteralPath $p) { Remove-Item -LiteralPath $p -Recurse -Force -ErrorAction SilentlyContinue }
-            New-Item -ItemType Directory -Path $p -Force | Out-Null
-        }
-
-        $mergeStage    = $workPaths.MergeRoot
-        $existingZipDl = Join-Path -Path $workPaths.JobRoot -ChildPath 'ZE'
-        foreach ($p in @($mergeStage,$existingZipDl)) {
-            if (Test-Path -LiteralPath $p) { Remove-Item -LiteralPath $p -Recurse -Force -ErrorAction SilentlyContinue }
-            New-Item -ItemType Directory -Path $p -Force | Out-Null
-        }
-
-        $canonicalContainerName = [System.IO.Path]::GetFileNameWithoutExtension($canonicalZipName)
-        $canonicalRoot = Join-Path -Path $mergeStage -ChildPath $canonicalContainerName
-        if (-not (Test-Path -LiteralPath $canonicalRoot)) { New-Item -ItemType Directory -Path $canonicalRoot -Force | Out-Null }
-
-        $ziperr = 0
-        $zipCounter = 0
-
-        foreach ($z in $matchingZips) {
-            $zipCounter++
-            $localZip = Join-Path -Path $existingZipDl -ChildPath $z.Name
-            $zipExtract = Join-Path -Path $existingZipDl -ChildPath ("X{0:D2}" -f $zipCounter)
-
-            try {
-                Write-log ("Option D merge: downloading ZIP {0}" -f $z.Name) -Severity INFO -ToConsole
-                Get-PnPFile -ServerRelativeUrl "$serverRelativeSubRoot/$($z.Name)" `
-                            -Path $existingZipDl `
-                            -FileName $($z.Name) `
-                            -AsFile -Force `
-                            -Connection $Connection
-
-                if (Test-Path -LiteralPath $zipExtract) { Remove-Item -LiteralPath $zipExtract -Recurse -Force -ErrorAction SilentlyContinue }
-                New-Item -ItemType Directory -Path $zipExtract -Force | Out-Null
-
-                Write-log ("Option D merge: extracting {0}" -f $z.Name) -Severity INFO -ToConsole
-                Expand-Archive -LiteralPath $localZip -DestinationPath $zipExtract -Force
-
-                $zipInfo = Get-NormalizedContainerInfo -Path $zipExtract -PreferredContainerName $canonicalContainerName
-                Merge-LocalFolderContents -SourceRoot $zipInfo.ContentRoot -TargetRoot $canonicalRoot -Mode $ConflictMode -LogPrefix ("[OptionD ZIP:{0}] " -f $z.Name) | Out-Null
-            }
-            catch {
-                Write-log ("Option D merge: failed to download/extract/merge {0}: {1}" -f $z.Name,$_.Exception.Message) -Severity ERROR -ToConsole
-                $ziperr++
-            }
-            finally {
-                if (Test-Path -LiteralPath $zipExtract) { Remove-Item -LiteralPath $zipExtract -Recurse -Force -ErrorAction SilentlyContinue }
-            }
-        }
-
-        $zipdestination = Join-Path -Path $workPaths.ZipRoot -ChildPath $canonicalZipName
-
-        if ($ziperr -eq 0) {
-            try {
-                if (Test-Path -LiteralPath $zipdestination) { Remove-Item -LiteralPath $zipdestination -Force -ErrorAction SilentlyContinue }
-                Write-log ("Option D merge: creating merged ZIP {0}" -f $canonicalZipName) -Severity INFO -ToConsole
-                Compress-Archive -Path (Join-Path $mergeStage '*') -DestinationPath $zipdestination -Force
-
-                $mergedCount = $null
-                $ZipFile = $null
-                try {
-                    $ZipFile = [System.IO.Compression.ZipFile]::Open($zipdestination,[System.IO.Compression.ZipArchiveMode]::Read)
-                    $mergedCount = $ZipFile.Entries.Count
-                }
-                finally {
-                    if ($ZipFile) { $ZipFile.Dispose() }
-                }
-                Write-log ("Option D merge: merged ZIP created: {0} now holds {1} files" -f $canonicalZipName,$mergedCount) -Severity INFO -ToConsole
-            }
-            catch {
-                Write-log ("Option D merge: failed to create merged ZIP for ref {0}: {1}" -f $refNumber,$_.Exception.Message) -Severity ERROR -ToConsole
-                $ziperr++
-            }
-        }
-
-        if ($ziperr -eq 0) {
-            try {
-                $zipServerRelativeUrl = "$serverRelativeSubRoot/$canonicalZipName"
-                Write-log ("Option D merge: uploading final ZIP {0} to {1}" -f $canonicalZipName,$serverRelativeSubRoot) -Severity INFO -ToConsole
-                try { Set-PnPFileCheckedOut -Url $zipServerRelativeUrl -Connection $Connection -ErrorAction SilentlyContinue } catch { }
-                Add-PnPFile -Path $zipdestination -Folder ($subrooturl.TrimStart("/")) -Connection $Connection | Out-Null
-                try { Set-PnPFileCheckedIn -Url $zipServerRelativeUrl -CheckinType MajorCheckIn -Connection $Connection -ErrorAction SilentlyContinue } catch { }
-            }
-            catch {
-                Write-log ("Option D merge: failed to upload final ZIP {0}: {1}" -f $canonicalZipName,$_.Exception.Message) -Severity ERROR -ToConsole
-                $ziperr++
-            }
-        }
-
-        if ($ziperr -eq 0) {
-            $dupes = @($matchingZips | Where-Object { $_.Name -ne $canonicalZipName })
-            foreach ($d in $dupes) {
-                Write-log ("Option D merge: deleting duplicate ZIP on SharePoint after successful merge: {0}" -f $d.Name) -Severity WARN -ToConsole
-                    try {
-                        Remove-PnPFile -ServerRelativeUrl "$serverRelativeSubRoot/$($d.Name)" -Force -Connection $Connection
-                    }
-                    catch {
-                        Write-log ("Option D merge: failed to delete duplicate ZIP {0}: {1}" -f $d.Name,$_.Exception.Message) -Severity WARN -ToConsole
-                    }
-            }
-        }
-
-        if (Test-Path -LiteralPath $mergeStage) { Remove-Item -LiteralPath $mergeStage -Recurse -Force -ErrorAction SilentlyContinue }
-        if (Test-Path -LiteralPath $existingZipDl) { Remove-Item -LiteralPath $existingZipDl -Recurse -Force -ErrorAction SilentlyContinue }
-
-        if ($ziperr -eq 0) {
-            return [pscustomobject]@{ Status='Merged'; Reason='OK'; RangeFolder=$rangeName; Ref=$refNumber; FinalZip=$canonicalZipName }
-        }
-        return [pscustomobject]@{ Status='Error'; Reason='Merge/upload error'; RangeFolder=$rangeName; Ref=$refNumber; FinalZip=$canonicalZipName }
-    }
-
-    function Invoke-DuplicateZipMergeFromRows {
-        param(
-            [Parameter(Mandatory)] [object[]] $DuplicateRows,
-            [Parameter(Mandatory)] [string] $FolderSiteRelativeURL,
-            [Parameter(Mandatory)] [string] $FolderServerRelativeURL,
-            [Parameter(Mandatory)] [string] $RunTemp,
-            [Parameter(Mandatory)] $Connection,
-            [Parameter(Mandatory)] [ValidateSet('LatestWins','Rename','Fail')] [string] $ConflictMode,
-            [Parameter(Mandatory)] [ValidateSet('SelectedRoot','AllRoots')] [string] $Scope,
-            [switch] $NonInteractive
-        )
-
-        if ($DuplicateRows.Count -eq 0) { return @() }
-
-        $rowsToMerge = @($DuplicateRows)
-
-        if ($Scope -eq 'SelectedRoot') {
-            $rootGroups = @($DuplicateRows | Group-Object RangeFolder | Sort-Object Name)
-            if ($rootGroups.Count -eq 1) {
-                $rowsToMerge = @($rootGroups[0].Group)
-                Write-log ("Option D merge: only one root folder has duplicates; selected {0}." -f $rootGroups[0].Name) -Severity INFO -ToConsole
-            }
-            else {
-                Write-Host ''
-                Write-Host "Root folders with duplicate ZIP references:" -ForegroundColor Cyan
-                for ($i = 0; $i -lt $rootGroups.Count; $i++) {
-                    $groupCount = @($rootGroups[$i].Group | Group-Object RangeFolder, Ref).Count
-                    Write-Host ("  {0} = {1} ({2} duplicate reference group(s))" -f ($i + 1), $rootGroups[$i].Name, $groupCount)
-                }
-                $selection = Read-Host ("Enter the root folder number to merge. Press Enter to cancel")
-                if ([string]::IsNullOrWhiteSpace($selection)) {
-                    Write-log "Option D merge: cancelled before selecting a root folder." -Severity WARN -ToConsole
-                    return @()
-                }
-                if (($selection -notmatch '^\d+$') -or ([int]$selection -lt 1) -or ([int]$selection -gt $rootGroups.Count)) {
-                    Write-log ("Option D merge: invalid root folder selection '{0}'. Cancelled." -f $selection) -Severity WARN -ToConsole
-                    return @()
-                }
-                $rowsToMerge = @($rootGroups[[int]$selection - 1].Group)
-            }
-        }
-
-        $mergeResults = New-Object System.Collections.Generic.List[object]
-        $groups = @($rowsToMerge | Group-Object RangeFolder, Ref | Sort-Object Name)
-        Write-log ("Option D merge: {0} duplicate reference group(s) selected for merge." -f $groups.Count) -Severity WARN -ToConsole
-
-        foreach ($g in $groups) {
-            $result = Invoke-DuplicateZipGroupMerge -DuplicateRows @($g.Group) `
-                                                     -FolderSiteRelativeURL $FolderSiteRelativeURL `
-                                                     -FolderServerRelativeURL $FolderServerRelativeURL `
-                                                     -RunTemp $RunTemp `
-                                                     -Connection $Connection `
-                                                     -ConflictMode $ConflictMode `
-                                                     -NonInteractive:$NonInteractive
-            $mergeResults.Add($result) | Out-Null
-        }
-
-        Write-Host ''
-        Write-Host "Option D merge summary:" -ForegroundColor Cyan
-        $mergeResults | Format-Table Status, RangeFolder, Ref, FinalZip, Reason -AutoSize | Out-String -Width 300 | Write-Host
-        return @($mergeResults)
-    }
-
     # ---- CONNECT ----
     Clear-Host
     Write-log "Running script version $scriptVersion" -ToConsole
@@ -1274,7 +836,6 @@ process
         Write-Host "Q. Quit"
         $folderSelection = Read-Host "Enter the number of the folder to process, or 'A', 'C', 'D', 'Q' (default 'Q')"
         if ([string]::IsNullOrWhiteSpace($folderSelection)) { $folderSelection = 'Q' }
-        $folderSelection = $folderSelection.ToUpperInvariant()
 
         # OPTION C: display-only check that uncompressed folders and already-compressed ZIP files are in the right range folder.
         # This option deliberately avoids Write-log for detected placement issues.
@@ -1295,53 +856,104 @@ process
 
         if ($folderSelection -eq 'D')
         {
-            $dupRows = @(Get-DuplicateZipReferenceRows -RootFolders $rootfolds `
-                                                   -FolderSiteRelativeURL $FolderSiteRelativeURL `
-                                                   -FolderServerRelativeURL $FolderServerRelativeURL `
-                                                   -Connection $ActiveConnection `
-                                                   -LogFolderName $LogFolderName)
+        Write-Host "Scanning range folders for duplicate ZIP references (per folder, consolidated output)..." -ForegroundColor Cyan
+        # Defensive: ensure we scan only folder-like entries and exclude the history folder
+        $scanFolders = @($rootfolds | Where-Object { $_ -and $_.Name -and $_.Name -ne $LogFolderName })
+        # Prefer folders that look like ranges (###### - ######). If none match, keep all.
+        $rangeLike = @($scanFolders | Where-Object { $_.Name -match '^\d{6}\s*-\s*\d{6}$' })
+        if ($rangeLike.Count -gt 0) { $scanFolders = $rangeLike }
+        Write-log ("Option D: {0} folder(s) to scan (from rootfolds)" -f $scanFolders.Count) -ToConsole
+        # Consolidated results: one row per ZIP participating in a duplicate set
+        $dupRows = New-Object System.Collections.Generic.List[object]
 
-            Write-DuplicateZipReferenceReport -DuplicateRows $dupRows
-            Export-DuplicateZipReferenceCsv -DuplicateRows $dupRows -RunTemp $RunTemp
+        foreach ($rf in $scanFolders)
+        {
+         $rangeName = $rf.Name
+         $subrooturl = "$FolderSiteRelativeURL/$rangeName"
+         #Enumerate files at the ROOT of the current range folder
+         try
+          {
+           $filesAtRoot = Get-PnPFolderItem -FolderSiteRelativeUrl $subrooturl -ItemType File -Connection $ActiveConnection -ErrorAction Stop
+          } 
+          catch
+          {
+            Write-log ("Option D: Cannot enumerate files in {0} - {1}" -f $subrooturl, $_.Exception.Message) -Severity WARN -ToConsole
+            continue
+           }
+          $subZipItems = @($filesAtRoot | Where-Object { $_.Name -match '(?i)\.zip$' })
 
-            if ($dupRows.Count -gt 0) {
-                Write-Host ''
-                Write-Host "Duplicate ZIP merge options:" -ForegroundColor Cyan
-                Write-Host "R. Merge all duplicate ZIP groups in one selected root folder"
-                Write-Host "G. Merge all duplicate ZIP groups in every scanned root folder"
-                Write-Host "Q. Quit without merging"
-                $mergeSelection = Read-Host "Enter 'R', 'G' or 'Q' (default 'Q')"
-                if ([string]::IsNullOrWhiteSpace($mergeSelection)) { $mergeSelection = 'Q' }
-                $mergeSelection = $mergeSelection.ToUpperInvariant()
+          # Index: 6-digit ref -> list of zip items (supports duplicates)  (same logic as in zipping loop)
+          $zipIndex = @{}
+          $zipNoRef = @()
 
-                if ($mergeSelection -eq 'R') {
-                    Invoke-DuplicateZipMergeFromRows -DuplicateRows $dupRows `
-                                                     -FolderSiteRelativeURL $FolderSiteRelativeURL `
-                                                     -FolderServerRelativeURL $FolderServerRelativeURL `
-                                                     -RunTemp $RunTemp `
-                                                     -Connection $ActiveConnection `
-                                                     -ConflictMode $ConflictMode `
-                                                     -Scope SelectedRoot | Out-Null
-                }
-                elseif ($mergeSelection -eq 'G') {
-                    Invoke-DuplicateZipMergeFromRows -DuplicateRows $dupRows `
-                                                     -FolderSiteRelativeURL $FolderSiteRelativeURL `
-                                                     -FolderServerRelativeURL $FolderServerRelativeURL `
-                                                     -RunTemp $RunTemp `
-                                                     -Connection $ActiveConnection `
-                                                     -ConflictMode $ConflictMode `
-                                                     -Scope AllRoots | Out-Null
-                }
-                elseif ($mergeSelection -eq 'Q') {
-                    Write-log "Option D: duplicate scan completed; merge skipped by user." -Severity INFO -ToConsole
-                }
-                else {
-                    Write-log ("Option D: invalid merge selection '{0}'. Merge skipped." -f $mergeSelection) -Severity WARN -ToConsole
-                }
+          foreach ($z in $subZipItems)
+           {
+            $ref = Get-SixDigitReference -Name $z.Name
+            if (-not [string]::IsNullOrWhiteSpace($ref)) {
+                if (-not $zipIndex.ContainsKey($ref)) { $zipIndex[$ref] = @() }
+                $zipIndex[$ref] += $z
+            } else
+            {
+             $zipNoRef += $z
             }
+        }
 
-            return
-        } # End of D Selection
+        # Optional per-folder inventory when debug is enabled
+        if ($dbg) {
+            Write-log ("Option D: [{0}] ZIP inventory: {1} zip(s) at root, {2} distinct ref(s), {3} zip(s) without 6-digit ref" -f $rangeName, $subZipItems.Count, $zipIndex.Keys.Count, $zipNoRef.Count) -ToConsole
+        }
+
+        # Collect duplicates found IN THIS FOLDER
+        foreach ($k in $zipIndex.Keys)
+        {
+          if ($zipIndex[$k].Count -gt 1)
+            {
+             foreach ($zz in $zipIndex[$k])
+             {
+              $sr = $null
+              if ($zz.PSObject.Properties.Match('ServerRelativeUrl').Count -gt 0) { $sr = $zz.ServerRelativeUrl }
+              if ([string]::IsNullOrWhiteSpace($sr)) { $sr = "$FolderServerRelativeURL/$rangeName/$($zz.Name)" }
+
+                    $dupRows.Add([pscustomobject]@{
+                        RangeFolder       = $rangeName
+                        Ref               = $k
+                        ZipName           = $zz.Name
+                        ServerRelativeUrl = $sr
+                    })
+              }
+            }
+        }
+        } #foreach ($rf in $scanFolders)
+
+    # Consolidated reporting
+    if ($dupRows.Count -eq 0) {
+        Write-Host "No duplicate ZIP references found in any scanned folder." -ForegroundColor Green
+    } else {
+        $groups = $dupRows | Group-Object RangeFolder, Ref
+        Write-Host ("Duplicate ZIP references detected (groups): {0}" -f $groups.Count) -ForegroundColor Yellow
+
+        foreach ($g in ($groups | Sort-Object Name)) {
+            $folder = $g.Group[0].RangeFolder
+            $ref    = $g.Group[0].Ref
+            Write-log ("WARNING: {0} ZIPs found for ref {1} in folder {2}:" -f $g.Count, $ref, $folder) -ToConsole -Severity WARN
+            foreach ($row in ($g.Group | Sort-Object ZipName)) {
+                Write-log (" - {0}" -f $row.ZipName) -ToConsole -Severity WARN
+            }
+        }
+
+        # Export CSV for audit/debug
+        try {
+            if (-not (Test-Path -LiteralPath $RunTemp)) { New-Item -ItemType Directory -Path $RunTemp -Force | Out-Null }
+            $csvPath = Join-Path $RunTemp ("DuplicateZipRefs_{0}.csv" -f (Get-Date -Format 'yyyyMMdd_HHmmss'))
+            $dupRows | Sort-Object RangeFolder, Ref, ZipName | Export-Csv -Path $csvPath -NoTypeInformation -Encoding UTF8
+            Write-Host ("CSV exported to: {0}" -f $csvPath) -ForegroundColor Cyan
+        } catch {
+            Write-log "Option D: Could not export CSV - $($_.Exception.Message)" -Severity WARN -ToConsole
+        }
+    }
+
+    return
+} # End of D Selection
 
 
         if ([string]::IsNullOrWhiteSpace($folderSelection)) { $folderSelection = 'A' }
@@ -1736,19 +1348,6 @@ process
              $zipServerRelativeUrl = "$serverRelativeSubRoot/$zipFileName"   # CHANGE alpha12/alpha13/alpha14: use the actual final ZIP name for checkout/checkin/upload
              #ZIP-centric upload log (ZIP is the entity; folder is the source input)
              Write-log ("[REF {0}] Uploading merged ZIP {1} to {2} (source folder: {3})" -f $refNumber,$zipFileName,$serverRelativeSubRoot,$subitem.Name) -Sub -Severity INFO -ToConsole
-
-             # Alpha19 safety guard: re-check destination before upload so a stale inventory cannot overwrite an unrelated ZIP.
-             $expectedExistingZipNames = @($matchingZips | ForEach-Object { $_.Name })
-             if (-not (Test-DestinationZipUploadSafe -FolderSiteRelativeUrl $subrooturl `
-                                                      -ServerRelativeSubRoot $serverRelativeSubRoot `
-                                                      -ZipFileName $zipFileName `
-                                                      -RefNumber $refNumber `
-                                                      -ExpectedExistingZipNames $expectedExistingZipNames `
-                                                      -Connection $ActiveConnection `
-                                                      -Sub)) {
-                 Write-log ("[REF {0}] Upload skipped; source folder kept untouched: {1}" -f $refNumber,$subitem.Name) -Sub -Severity WARN -ToConsole
-                 continue
-             }
 
              # If file already exists, try to checkout (ignore errors if not existing)
              try
