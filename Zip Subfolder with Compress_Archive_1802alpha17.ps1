@@ -18,10 +18,16 @@
 
 .CHANGELOG
 
+    1802alpha19 WISH LIST
+     - Create Temp folder ($TempRoot) if folder does not exist.
+     - Propose to merge duplicate folders even they are more than 2 per reference
+     - Propose to move subfolder falling outside of folder range.
 
-    1802alpha17 / 17.06.2026
+     
+    1802alpha18 / 17.06.2026
       - CHANGE alpha17: added menu option C to check that uncompressed folders and already-compressed ZIP files are stored in the correct 6-digit range folder.
       - CHANGE alpha17: option C is display-only: it does not download, upload, delete or write the detected placement issues to any log file.
+      - CHANGE alpha17: option Q (quit) is now default is user is pressing ENTER on menu selection.
 
     1802alpha16 / 17.06.2026
       - CHANGE alpha16: every folder skipped because it has no standalone 6-digit reference is now logged individually on screen, in the main run log, and in the per-root compression history log.
@@ -60,7 +66,7 @@
 
     1800 / 05.12.2025:
       - Get-SafeFileName and Get-HashSuffix for <=255 local path constraint.
-      1800 / 05.12.2025: new feature,  Download-SPOFolder function will truncate files with path too long automatically.
+      1800 / 05.12.2025: new feature,  Read-SpoFolder function will truncate files with path too long automatically.
                     if a file to be downloaded from Sharepoint is too long for download on local machine, function will rename file to fit <255 cars.
                     file will be truncated with a 6 cars hash at the end to ensure uniqueness and length <255
                     example:
@@ -69,7 +75,7 @@
                    (also taking onto account the full path of the folder until we reach the file)
 
                     resulting no longer onto local folder download errors before compression and zip resent to Sharepoint.
-                   see Function Get-HashSuffix and Get-SafeFileName called by Download-SPOFolder.
+                   see Function Get-HashSuffix and Get-SafeFileName called by Read-SpoFolder.
 
     1708 / 04.12.2025: no need to process an empty subitem:
     -> we skip it 
@@ -96,16 +102,14 @@
     #$env:PNPPOWERSHELL_UPDATECHECK = "OFF"
 #>
 
-[CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'High')]
-
 param(
     [Parameter()]
     [ValidateNotNullOrEmpty()]
-    [string] $ShpDomain = "https://xxx.sharepoint.com",
+    [string] $ShpDomain = "https://ing.sharepoint.com",
 
     [Parameter()]
     [ValidateNotNullOrEmpty()]
-    [string] $Site = "/sites/xxxxx", # site-relative for consistency
+    [string] $Site = "/sites/GRCH000062_FS", # site-relative for consistency
 
     [Parameter()]
     [ValidateNotNullOrEmpty()]
@@ -132,18 +136,12 @@ begin {
     $ErrorActionPreference = 'Stop'
     $ProgressPreference    = 'SilentlyContinue'  # speeds up lots of cmdlet calls
     $env:PNPPOWERSHELL_UPDATECHECK = "OFF"
-
     $scriptVersion = "1802alpha17"   # CHANGE alpha17: add display-only placement check menu option C
-
-
     $ConflictMode = 'LatestWins'
-
     $dbg = $false
-
     $SiteUrl = "$ShpDomain$Site"
     $FolderSiteRelativeURL = "$DocLib$DocFolder"                 # site-relative: "/Shared Documents/_Archived Files"
     $FolderServerRelativeURL = "$Site$FolderSiteRelativeURL"     # server-relative: "/sites/.../Shared Documents/_Archived Files"
-
 
     # temp structure: create a per-run folder
     if (-not (Test-Path -LiteralPath $TempRoot)) {
@@ -156,7 +154,7 @@ begin {
     
     
     # Generate a random 2-character string (letters and numbers)
-    $runStamp = -join ((65..90 + 97..122 + 48..57) | Get-Random -Count 2 | % {[char]$_})
+    $runStamp = -join ((65..90 + 97..122 + 48..57) | Get-Random -Count 2 | ForEach-Object {[char]$_})
 
     # Example usage:
     $RunTemp = Join-Path $TempRoot $runStamp
@@ -170,11 +168,12 @@ begin {
 }
 
 process
+
 {
-    function Log-Message {
+    function Write-log  {
         param(
             [Parameter(Mandatory)] [string] $Message,
-            [ValidateSet('INFO','WARN','ERROR','FATAL','DEBUG')]
+            [ValidateSet('DEBUG', 'INFO','WARN','ERROR','FATAL')]
             [string] $Severity = "INFO",
             [switch] $ToConsole,
             [switch] $Sub
@@ -186,7 +185,7 @@ process
             switch ($Severity) {
                 'ERROR' { Write-Host $Message -ForegroundColor Red }
                 'WARN'  { Write-Host $Message -ForegroundColor Yellow }
-                'DEBUG' { Write-Host $Message -ForegroundColor DarkGray }
+                'DEBUG' { Write-Host $Message -ForegroundColor Gray }
                 default { Write-Host $Message }
             }
         }
@@ -234,7 +233,7 @@ process
             [Parameter(Mandatory)] [string] $LogFolderName
         )
 
-        # CHANGE alpha17: display-only audit. Do not call Log-Message here.
+        # CHANGE alpha17: display-only audit. Do not call Write-log here.
         Write-Host "Checking placement of uncompressed folders and already-compressed ZIP files..." -ForegroundColor Cyan
         Write-Host "No download, upload, delete or log write will be performed by this check." -ForegroundColor Cyan
 
@@ -393,7 +392,10 @@ process
             [Parameter(Mandatory)] [string] $OriginalName,
             [int] $MaxPathLength = 255
         )
-        $sep = [System.IO.Path]::DirectorySeparatorChar
+
+        # $sep = [System.IO.Path]::DirectorySeparatorChar  VS code says variable not used anymore
+
+
         $fullOriginal = Join-Path -Path $FolderPath -ChildPath $OriginalName
 
         if ($fullOriginal.Length -le $MaxPathLength) { return $OriginalName }
@@ -425,7 +427,7 @@ process
         return $newName
     }
 
-    function Download-SPOFolder {
+    function Read-SpoFolder {
         param(
             [Parameter(Mandatory)] [Microsoft.SharePoint.Client.Folder] $Folder,
             [Parameter(Mandatory)] [string] $DestinationRoot,
@@ -459,11 +461,11 @@ process
             $SafeFileName = Get-SafeFileName -FolderPath $LocalFolder -OriginalName $File.Name -MaxPathLength 255
             $LocalFilePath = Join-Path -Path $LocalFolder -ChildPath $SafeFileName
             if ($LocalFilePath.Length -gt 255) {
-                Log-Message -Message "Destination path too long ($($LocalFilePath.Length)). Cannot save '$($File.Name)' to '$LocalFolder' even after renaming." -Severity ERROR -ToConsole
+                Write-log -Message "Destination path too long ($($LocalFilePath.Length)). Cannot save '$($File.Name)' to '$LocalFolder' even after renaming." -Severity ERROR -ToConsole
                 continue
             }
             if ($SafeFileName -ne $File.Name) {
-                Log-Message -Message "Path >255 chars detected. Renaming on download: '$($File.Name)' -> '$SafeFileName'." -Severity WARN -ToConsole
+                Write-log -Message "Path >255 chars detected. Renaming on download: '$($File.Name)' -> '$SafeFileName'." -Severity WARN -ToConsole
             }
             if (-not (Test-Path -LiteralPath $LocalFilePath)) {
                 try {
@@ -474,19 +476,20 @@ process
                                 -Connection $ActiveConnection
                 } catch {
                     $script:errorOccurred = $true
-                    Log-Message -Message "Ran into an issue: $($_.ToString())" -Severity ERROR -ToConsole
+                    Write-log -Message "Ran into an issue: $($_.ToString())" -Severity ERROR -ToConsole
                 }
             }
         }
 
         $SubFolders = Get-PnPFolderItem -FolderSiteRelativeUrl $FolderURL -ItemType Folder -Connection $ActiveConnection
         foreach ($Sub in $SubFolders | Where-Object { $_.Name -ne "Forms" }) {
-            Download-SPOFolder -Folder $Sub -DestinationRoot $DestinationRoot -ActiveConnection $ActiveConnection -LocalBaseServerRelativeUrl $effectiveBase
+            Read-SpoFolder -Folder $Sub -DestinationRoot $DestinationRoot -ActiveConnection $ActiveConnection -LocalBaseServerRelativeUrl $effectiveBase
         }
     }
 
-    function Delete-PnPFolderRecursive {
-        param(
+    function Remove-PnPFolderRecursive
+    {
+         param(
             [Parameter(Mandatory)] [Microsoft.SharePoint.Client.Folder] $Folder,
             [Parameter(Mandatory)] $ActiveConnection
         )
@@ -499,21 +502,19 @@ process
 
         # files
         $Files = Get-PnPFolderItem -FolderSiteRelativeUrl $FolderSiteRelativeURL -ItemType File -Connection $ActiveConnection
-        foreach ($File in $Files) {
-            if ($PSCmdlet.ShouldProcess("File: $($File.ServerRelativeURL)","Remove-PnPFile")) {
-                Remove-PnPFile -ServerRelativeUrl $File.ServerRelativeURL -Force -Connection $ActiveConnection
-            }
+        foreach ($File in $Files)
+        {
+         Remove-PnPFile -ServerRelativeUrl $File.ServerRelativeURL -Force -Connection $ActiveConnection
         }
 
         # subfolders
         $SubFolders = Get-PnPFolderItem -FolderSiteRelativeUrl $FolderSiteRelativeURL -ItemType Folder -Connection $ActiveConnection
         foreach ($SubFolder in $SubFolders) {
-            if (($SubFolder.Name -ne "Forms") -and -not ($SubFolder.Name.StartsWith("_"))) {
-                Delete-PnPFolderRecursive -Folder $SubFolder -ActiveConnection $ActiveConnection
+            if (($SubFolder.Name -ne "Forms") -and -not ($SubFolder.Name.StartsWith("_"))) 
+            {
+                Remove-PnPFolderRecursive -Folder $SubFolder -ActiveConnection $ActiveConnection
                 $ParentFolderURL = $FolderSiteRelativeURL.TrimStart("/")
-                if ($PSCmdlet.ShouldProcess("Folder: $($SubFolder.ServerRelativeURL)","Remove-PnPFolder")) {
                     Remove-PnPFolder -Name $SubFolder.Name -Folder $ParentFolderURL -Force -Connection $ActiveConnection
-                }
             }
         }
     }
@@ -685,22 +686,22 @@ process
             [Parameter()] [string] $LogPrefix = ''
             )
 
-        Log-Message ("{0}Building in-memory inventories (Mode={1})" -f $LogPrefix,$Mode) -Sub -ToConsole -Severity INFO
+        Write-log ("{0}Building in-memory inventories (Mode={1})" -f $LogPrefix,$Mode) -Sub -ToConsole -Severity INFO
         $srcMap = Get-FileInventory -Root $SourceRoot
         $tgtMap = Get-FileInventory -Root $TargetRoot
 
-        Log-Message ("{0}Source files: {1} ; Target files: {2}" -f $LogPrefix,$srcMap.Count,$tgtMap.Count) -Sub -ToConsole -Severity INFO
+        Write-log ("{0}Source files: {1} ; Target files: {2}" -f $LogPrefix,$srcMap.Count,$tgtMap.Count) -Sub -ToConsole -Severity INFO
 
         $plan = New-MergePlan -SourceMap $srcMap -TargetMap $tgtMap -Mode $Mode
 
         $conf = $plan | Where-Object { $_.Action -in @('Overwrite','RenameCopy','Skip','ConflictFail') }
         foreach ($c in $conf) {
-            Log-Message ("{0}{1}: {2} -> {3}" -f $LogPrefix,$c.Action,$c.RelPath,$c.Reason) -Sub -ToConsole -Severity WARN
+            Write-log ("{0}{1}: {2} -> {3}" -f $LogPrefix,$c.Action,$c.RelPath,$c.Reason) -Sub -ToConsole -Severity WARN
         }
 
         $stats = Invoke-MergePlan -Plan $plan -Mode $Mode -TargetRoot $TargetRoot
 
-        Log-Message ("{0}Merge result: Copied={1}, Overwritten={2}, Renamed={3}, Skipped={4}, Conflicts={5}" -f $LogPrefix,$stats.Copied,$stats.Overwritten,$stats.Renamed,$stats.Skipped,$stats.Conflicts) -Sub -ToConsole -Severity INFO
+        Write-log ("{0}Merge result: Copied={1}, Overwritten={2}, Renamed={3}, Skipped={4}, Conflicts={5}" -f $LogPrefix,$stats.Copied,$stats.Overwritten,$stats.Renamed,$stats.Skipped,$stats.Conflicts) -Sub -ToConsole -Severity INFO
         return $stats
     }
     
@@ -734,7 +735,7 @@ process
         $candidates.Add($sourceFolderZipName) | Out-Null
         foreach ($z in $MatchingZips) { if (-not $candidates.Contains($z.Name)) { $candidates.Add($z.Name) | Out-Null } }
         if ($NonInteractive) {
-            Log-Message ("Duplicate ZIP merge running non-interactively. Default final ZIP name: {0}" -f $sourceFolderZipName) -Severity WARN -ToConsole -Sub
+            Write-log ("Duplicate ZIP merge running non-interactively. Default final ZIP name: {0}" -f $sourceFolderZipName) -Severity WARN -ToConsole -Sub
             return $sourceFolderZipName
         }
         Write-Host ''
@@ -744,11 +745,11 @@ process
         $selection = Read-Host ("Enter a number between 1 and {0}. Press Enter for default (1)" -f $candidates.Count)
         if ([string]::IsNullOrWhiteSpace($selection)) { $selection = '1' }
         if (($selection -notmatch '^\d+$') -or ([int]$selection -lt 1) -or ([int]$selection -gt $candidates.Count)) {
-            Log-Message ("Invalid duplicate ZIP selection '{0}'. Defaulting final ZIP name to {1}" -f $selection,$sourceFolderZipName) -Severity WARN -ToConsole -Sub
+            Write-log ("Invalid duplicate ZIP selection '{0}'. Defaulting final ZIP name to {1}" -f $selection,$sourceFolderZipName) -Severity WARN -ToConsole -Sub
             return $sourceFolderZipName
         }
         $chosenName = $candidates[[int]$selection - 1]
-        Log-Message ("Final merged ZIP name selected: {0}" -f $chosenName) -Severity INFO -ToConsole -Sub
+        Write-log ("Final merged ZIP name selected: {0}" -f $chosenName) -Severity INFO -ToConsole -Sub
         return $chosenName
     }
 
@@ -784,8 +785,9 @@ process
     }
 
     # ---- CONNECT ----
-    Log-Message "Running script version $scriptVersion" -ToConsole
-    Log-Message "Connecting to SharePoint site $SiteUrl" -ToConsole
+    Clear-Host
+    Write-log "Running script version $scriptVersion" -ToConsole
+    Write-log "Connecting to SharePoint site $SiteUrl" -ToConsole
 
     try
     {
@@ -793,23 +795,24 @@ process
         # simply close the window and it will use the alternative legacy method which work
         try
         {
-            $ActiveConnection = Connect-PnPOnline -Url $SiteUrl -Interactive -ReturnConnection
+            $ActiveConnection = Connect-PnPOnline -Url $SiteUrl  -Interactive -ReturnConnection     
+            
         } catch
         {
-            # Fallback for ISE/old runtimes
-            Log-Message "Falling back to legacy authentication." -Severity WARN -ToConsole
+            # Fallback for ISE/old runtimes but requires pnp.powershell 1.12 module (old)
+            Write-log "Falling back to legacy authentication." -Severity WARN -ToConsole
             $ActiveConnection = Connect-PnPOnline -Url $SiteUrl -UseWebLogin -ReturnConnection
         }
     }
     catch
     {
-        Log-Message "Cannot connect to target SharePoint site, execution aborted." -Severity FATAL -ToConsole
+        Write-log "Cannot connect to target SharePoint site, execution aborted." -Severity FATAL -ToConsole
         throw
     }
 
     # ---- DISCOVER ROOT FOLDERS ----
     $rootfolds = Get-PnPFolderItem -FolderSiteRelativeUrl $FolderSiteRelativeURL -Connection $ActiveConnection
-    Log-Message "Target Folder $FolderSiteRelativeURL has $($rootfolds.Count) subfolders to process" -ToConsole
+    Write-log "Target Folder $FolderSiteRelativeURL has $($rootfolds.Count) subfolders to process" -ToConsole
 
     # Show a quick snapshot:
     Write-Host "Scanning for folders to process on source: $($FolderServerRelativeURL)" -ForegroundColor Cyan
@@ -832,11 +835,11 @@ process
         Write-Host "C. Check folder/ZIP placement against 6-digit ranges (display only, no issue logging)"
         Write-Host "D. Find duplicate ZIP references"
         Write-Host "Q. Quit"
-        $folderSelection = Read-Host "Enter the number of the folder to process, or 'A', 'C', 'D', 'Q' (default 'A')"
-        if ([string]::IsNullOrWhiteSpace($folderSelection)) { $folderSelection = 'A' }
+        $folderSelection = Read-Host "Enter the number of the folder to process, or 'A', 'C', 'D', 'Q' (default 'Q')"
+        if ([string]::IsNullOrWhiteSpace($folderSelection)) { $folderSelection = 'Q' }
 
         # OPTION C: display-only check that uncompressed folders and already-compressed ZIP files are in the right range folder.
-        # This option deliberately avoids Log-Message for detected placement issues.
+        # This option deliberately avoids Write-log for detected placement issues.
         if ($folderSelection -eq 'C')
         {
             Invoke-PlacementCheck -RootFolders $rootfolds `
@@ -860,7 +863,7 @@ process
         # Prefer folders that look like ranges (###### - ######). If none match, keep all.
         $rangeLike = @($scanFolders | Where-Object { $_.Name -match '^\d{6}\s*-\s*\d{6}$' })
         if ($rangeLike.Count -gt 0) { $scanFolders = $rangeLike }
-        Log-Message ("Option D: {0} folder(s) to scan (from rootfolds)" -f $scanFolders.Count) -ToConsole
+        Write-log ("Option D: {0} folder(s) to scan (from rootfolds)" -f $scanFolders.Count) -ToConsole
         # Consolidated results: one row per ZIP participating in a duplicate set
         $dupRows = New-Object System.Collections.Generic.List[object]
 
@@ -875,7 +878,7 @@ process
           } 
           catch
           {
-            Log-Message ("Option D: Cannot enumerate files in {0} - {1}" -f $subrooturl, $_.Exception.Message) -Severity WARN -ToConsole
+            Write-log ("Option D: Cannot enumerate files in {0} - {1}" -f $subrooturl, $_.Exception.Message) -Severity WARN -ToConsole
             continue
            }
           $subZipItems = @($filesAtRoot | Where-Object { $_.Name -match '(?i)\.zip$' })
@@ -898,7 +901,7 @@ process
 
         # Optional per-folder inventory when debug is enabled
         if ($dbg) {
-            Log-Message ("Option D: [{0}] ZIP inventory: {1} zip(s) at root, {2} distinct ref(s), {3} zip(s) without 6-digit ref" -f $rangeName, $subZipItems.Count, $zipIndex.Keys.Count, $zipNoRef.Count) -ToConsole
+            Write-log ("Option D: [{0}] ZIP inventory: {1} zip(s) at root, {2} distinct ref(s), {3} zip(s) without 6-digit ref" -f $rangeName, $subZipItems.Count, $zipIndex.Keys.Count, $zipNoRef.Count) -ToConsole
         }
 
         # Collect duplicates found IN THIS FOLDER
@@ -933,9 +936,9 @@ process
         foreach ($g in ($groups | Sort-Object Name)) {
             $folder = $g.Group[0].RangeFolder
             $ref    = $g.Group[0].Ref
-            Log-Message ("WARNING: {0} ZIPs found for ref {1} in folder {2}:" -f $g.Count, $ref, $folder) -ToConsole -Severity WARN
+            Write-log ("WARNING: {0} ZIPs found for ref {1} in folder {2}:" -f $g.Count, $ref, $folder) -ToConsole -Severity WARN
             foreach ($row in ($g.Group | Sort-Object ZipName)) {
-                Log-Message (" - {0}" -f $row.ZipName) -ToConsole -Severity WARN
+                Write-log (" - {0}" -f $row.ZipName) -ToConsole -Severity WARN
             }
         }
 
@@ -946,7 +949,7 @@ process
             $dupRows | Sort-Object RangeFolder, Ref, ZipName | Export-Csv -Path $csvPath -NoTypeInformation -Encoding UTF8
             Write-Host ("CSV exported to: {0}" -f $csvPath) -ForegroundColor Cyan
         } catch {
-            Log-Message "Option D: Could not export CSV - $($_.Exception.Message)" -Severity WARN -ToConsole
+            Write-log "Option D: Could not export CSV - $($_.Exception.Message)" -Severity WARN -ToConsole
         }
     }
 
@@ -957,14 +960,14 @@ process
         if ([string]::IsNullOrWhiteSpace($folderSelection)) { $folderSelection = 'A' }
         if ($folderSelection -eq 'Q')
          {
-         Log-Message "Script terminated by user." -Severity FATAL -ToConsole
+         Write-log "Script terminated by user." -Severity FATAL -ToConsole
          return
          }
         if ($folderSelection -ne 'A')
          {
           if (($folderSelection -notmatch '^\d+$') -or ([int]$folderSelection -lt 1) -or ([int]$folderSelection -gt $rootfolds.Count))
            {
-            Log-Message ("Invalid selection '{0}'. Script terminated." -f $folderSelection) -Severity FATAL -ToConsole
+            Write-log ("Invalid selection '{0}'. Script terminated." -f $folderSelection) -Severity FATAL -ToConsole
             return
            }
           $selected = @($rootfolds[[int]$folderSelection - 1])
@@ -978,7 +981,7 @@ process
 
     foreach ($rootfold in $selected)
     {
-     Log-Message "Processing folder: $($rootfold.Name)" -ToConsole
+     Write-log "Processing folder: $($rootfold.Name)" -ToConsole
      $subrooturl = "$FolderSiteRelativeURL/$($rootfold.Name)"         # site-relative
      $serverRelativeSubRoot = "$FolderServerRelativeURL/$($rootfold.Name)"  # server-relative
      
@@ -986,7 +989,7 @@ process
      Resolve-PnPFolder -SiteRelativePath "$subrooturl/$LogFolderName" -Connection $ActiveConnection | Out-Null
 
      # Per-root sub-log must exist before the no-reference filter.
-     # CHANGE alpha16: skipped folders are written to this file via Log-Message -Sub.
+     # CHANGE alpha16: skipped folders are written to this file via Write-log -Sub.
      $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
      $sublogfile = "log_$($rootfold.Name)_$timestamp.txt"
      $subLogPath = Join-Path -Path $RunTemp -ChildPath $sublogfile
@@ -1002,40 +1005,40 @@ process
 
      if ($subitemsWithoutRef.Count -gt 0)
       {
-       Log-Message ("Skipping {0} subfolder(s) without standalone 6-digit reference before any processing/download." -f $subitemsWithoutRef.Count) -Severity WARN -ToConsole -Sub
+       Write-log ("Skipping {0} subfolder(s) without standalone 6-digit reference before any processing/download." -f $subitemsWithoutRef.Count) -Severity WARN -ToConsole -Sub
        foreach ($skippedSubitem in ($subitemsWithoutRef | Sort-Object Name))
         {
          $skippedSubitemUrl = "$subrooturl/$($skippedSubitem.Name)"
-         Log-Message ("[SKIP NO REF] Source folder skipped before download: {0}. Reason: folder name does not contain a standalone 6-digit reference. No download, ZIP update, upload or delete will be attempted." -f $skippedSubitemUrl) -Severity WARN -ToConsole -Sub
+         Write-log ("[SKIP NO REF] Source folder skipped before download: {0}. Reason: folder name does not contain a standalone 6-digit reference. No download, ZIP update, upload or delete will be attempted." -f $skippedSubitemUrl) -Severity WARN -ToConsole -Sub
         }
       }
      
      if ($subqty -eq 0)
       {
-       Log-Message "This folder has no eligible subfolder to compress; folders without standalone 6-digit reference were skipped before download." -ToConsole -Sub
+       Write-log "This folder has no eligible subfolder to compress; folders without standalone 6-digit reference were skipped before download." -ToConsole -Sub
        if (Test-Path -LiteralPath $subLogPath)
         {
          try
           {
            $logDestSiteRel = "$subrooturl/$LogFolderName"
            $logDestFolder = Get-PnPFolder -Url $logDestSiteRel -Connection $ActiveConnection
-           Log-Message "Uploading compression log $sublogfile to $($logDestFolder.ServerRelativeUrl)" -Severity INFO -ToConsole
+           Write-log "Uploading compression log $sublogfile to $($logDestFolder.ServerRelativeUrl)" -Severity INFO -ToConsole
            Add-PnPFile -Path $subLogPath -Folder $logDestSiteRel.TrimStart("/") -Connection $ActiveConnection | Out-Null
           }
          catch
           {
-           Log-Message "Failed to upload compression log $sublogfile : $($_.Exception.Message)" -Severity WARN -ToConsole
+           Write-log "Failed to upload compression log $sublogfile : $($_.Exception.Message)" -Severity WARN -ToConsole
           }
         }
        Write-Host ""
        continue
       }
 
-     Log-Message "This folder has $subqty eligible subfolder(s) to compress" -ToConsole -Sub
+     Write-log "This folder has $subqty eligible subfolder(s) to compress" -ToConsole -Sub
 
      # Zips directly under the subroot (rootfold) - inventory in memory
      # Build an in-memory index of ZIPs by 6-digit reference for fast lookup and better traceability
-     Log-Message "Getting list of existing ZIP files at $subrooturl (inventory in memory)" -ToConsole
+     Write-log "Getting list of existing ZIP files at $subrooturl (inventory in memory)" -ToConsole
 
      $filesAtRoot = Get-PnPFolderItem -FolderSiteRelativeUrl $subrooturl -ItemType File -Connection $ActiveConnection
      $subZipItems = $filesAtRoot | Where-Object { $_.Name -match '(?i)\.zip$' }
@@ -1054,14 +1057,14 @@ process
                 $zipNoRef += $z
             }
         }
-     Log-Message ("ZIP inventory: {0} zip(s) found at root, {1} distinct ref(s), {2} zip(s) without 6-digit ref" -f $subZipItems.Count, $zipIndex.Keys.Count, $zipNoRef.Count) -ToConsole
+     Write-log ("ZIP inventory: {0} zip(s) found at root, {1} distinct ref(s), {2} zip(s) without 6-digit ref" -f $subZipItems.Count, $zipIndex.Keys.Count, $zipNoRef.Count) -ToConsole
      
      foreach ($k in $zipIndex.Keys)
      {
             if ($zipIndex[$k].Count -gt 1) {
-                Log-Message ("WARNING: {0} ZIPs found for ref {1}:" -f $zipIndex[$k].Count, $k) -ToConsole -Severity WARN
+                Write-log ("WARNING: {0} ZIPs found for ref {1}:" -f $zipIndex[$k].Count, $k) -ToConsole -Severity WARN
                 foreach ($zz in $zipIndex[$k]) {
-                    Log-Message (" - {0}" -f $zz.Name) -ToConsole -Severity WARN
+                    Write-log (" - {0}" -f $zz.Name) -ToConsole -Severity WARN
                 }
             }
         }
@@ -1078,18 +1081,18 @@ process
             # stop immediately before empty-check, workspace creation, download, ZIP handling or deletion.
             $refNumber = Get-SixDigitReference -Name $subitem.Name
             if ([string]::IsNullOrWhiteSpace($refNumber)) {
-                Log-Message "Skipping folder $subitemUrl because its name has no standalone 6-digit reference. No download, ZIP update, upload or delete will be attempted." -Sub -ToConsole -Severity WARN
+                Write-log "Skipping folder $subitemUrl because its name has no standalone 6-digit reference. No download, ZIP update, upload or delete will be attempted." -Sub -ToConsole -Severity WARN
                 continue
             }
 
-            Log-Message "Processing compression of $subitemUrl folder" -Sub -ToConsole
-            Log-Message "Folder reference: $refNumber" -Sub -ToConsole
+            Write-log "Processing compression of $subitemUrl folder" -Sub -ToConsole
+            Write-log "Folder reference: $refNumber" -Sub -ToConsole
             Write-Host ""
 
             # Determine if empty (direct children)
             $itemsInFolder = (Get-PnPFolderItem -FolderSiteRelativeUrl $subitemUrl -Connection $ActiveConnection).Count
             if ($itemsInFolder -le 0) {
-                Log-Message "Folder $subitemUrl is empty, nothing to compress, skipping it." -Sub -ToConsole -Severity WARN
+                Write-log "Folder $subitemUrl is empty, nothing to compress, skipping it." -Sub -ToConsole -Severity WARN
                 continue
             }
 
@@ -1099,17 +1102,18 @@ process
                 if (Test-Path -LiteralPath $p) { Remove-Item -LiteralPath $p -Recurse -Force -ErrorAction SilentlyContinue }
                 New-Item -ItemType Directory -Path $p -Force | Out-Null
             }
-            $LocalFolderRoot = $workPaths.JobRoot
+            
+            # $LocalFolderRoot = $workPaths.JobRoot  - VS code says variable not used anymore
 
             # CHANGE alpha11/alpha12/alpha13/alpha14: download only current $subitem tree under SourceRoot, not the full SharePoint path
             $FolderObj = Get-PnPFolder -Url  $subitemUrl -Connection $ActiveConnection
-            Log-Message "Downloading local copy of $($FolderObj.ServerRelativeUrl) into short work area $($workPaths.SourceRoot)" -Sub -ToConsole -Severity INFO
+            Write-log "Downloading local copy of $($FolderObj.ServerRelativeUrl) into short work area $($workPaths.SourceRoot)" -Sub -ToConsole -Severity INFO
 
             $script:errorOccurred = $false
-            Download-SPOFolder -Folder $FolderObj -DestinationRoot $workPaths.SourceRoot -ActiveConnection $ActiveConnection -LocalBaseServerRelativeUrl $serverRelativeSubRoot
+            Read-SpoFolder -Folder $FolderObj -DestinationRoot $workPaths.SourceRoot -ActiveConnection $ActiveConnection -LocalBaseServerRelativeUrl $serverRelativeSubRoot
 
             if ($script:errorOccurred) {
-                Log-Message "Errors occurred during download from SharePoint, skipping folder" -Sub -Severity ERROR -ToConsole
+                Write-log "Errors occurred during download from SharePoint, skipping folder" -Sub -Severity ERROR -ToConsole
                 continue
             }
 
@@ -1125,10 +1129,10 @@ process
              if ($matchingZips.Count -eq 1) # ONE MATCHING ZIP, APPEND TO EXISTING ZIP
              {
                 $matchingZip = $matchingZips[0]
-                Log-Message "Found a matching ZIP on SharePoint (memory): $($matchingZip.Name)" -Sub -ToConsole -Severity INFO
+                Write-log "Found a matching ZIP on SharePoint (memory): $($matchingZip.Name)" -Sub -ToConsole -Severity INFO
 
                 # CHANGE alpha12/alpha13/alpha14: verified path alignment - existing ZIP is downloaded into ZipRoot and opened from the same ZipRoot path
-                Log-Message "Downloading ZIP from SharePoint: $subrooturl/$($matchingZip.Name) into short ZIP work area $($workPaths.ZipRoot)" -Sub -ToConsole -Severity INFO
+                Write-log "Downloading ZIP from SharePoint: $subrooturl/$($matchingZip.Name) into short ZIP work area $($workPaths.ZipRoot)" -Sub -ToConsole -Severity INFO
 
                 $zipLocalPath = Join-Path -Path $workPaths.ZipRoot -ChildPath $($matchingZip.Name)
                 try {
@@ -1147,7 +1151,7 @@ process
                     } finally {
                         if ($ZipFile) { $ZipFile.Dispose() }
                     }
-                    Log-Message "$($matchingZip.Name) currently holds $zipBeforeCount files" -Sub -Severity INFO -ToConsole
+                    Write-log "$($matchingZip.Name) currently holds $zipBeforeCount files" -Sub -Severity INFO -ToConsole
 
                     #True merge using staging folder + conflict strategy ($ConflictMode)
                     $mergeStage = $workPaths.MergeRoot   # CHANGE alpha11/alpha12/alpha13/alpha14: use a short dedicated merge staging folder
@@ -1157,7 +1161,7 @@ process
                     }
                     New-Item -ItemType Directory -Path $mergeStage -Force | Out-Null
 
-                    Log-Message "Extracting existing ZIP into staging: $mergeStage" -Sub -ToConsole -Severity INFO
+                    Write-log "Extracting existing ZIP into staging: $mergeStage" -Sub -ToConsole -Severity INFO
                     Expand-Archive -LiteralPath $zipLocalPath -DestinationPath $mergeStage -Force
 
                     # CHANGE alpha14: normalize both existing ZIP and incoming source under one canonical top-level folder
@@ -1169,7 +1173,7 @@ process
                     if (-not (Test-Path -LiteralPath $canonicalRoot)) { New-Item -ItemType Directory -Path $canonicalRoot -Force | Out-Null }
                     Merge-LocalFolderContents -SourceRoot $sourceInfo.ContentRoot -TargetRoot $canonicalRoot -Mode $ConflictMode -LogPrefix "[ExistingZIP Merge] " | Out-Null
 
-                    Log-Message "Rebuilding ZIP from staging (true merge) into: $zipLocalPath" -Sub -ToConsole -Severity INFO
+                    Write-log "Rebuilding ZIP from staging (true merge) into: $zipLocalPath" -Sub -ToConsole -Severity INFO
                     if (Test-Path -LiteralPath $zipLocalPath) {
                         Remove-Item -LiteralPath $zipLocalPath -Force -ErrorAction SilentlyContinue
                     }
@@ -1183,7 +1187,7 @@ process
                     } finally {
                         if ($ZipFile) { $ZipFile.Dispose() }
                     }
-                    Log-Message "Updated $($matchingZip.Name). File now holds $zipAfterCount files" -Sub -Severity INFO -ToConsole
+                    Write-log "Updated $($matchingZip.Name). File now holds $zipAfterCount files" -Sub -Severity INFO -ToConsole
 
                     # Cleanup staging
                     if (Test-Path -LiteralPath $mergeStage) {
@@ -1191,7 +1195,7 @@ process
                     }
 
                 } catch {
-                    Log-Message "Failed to download/update existing ZIP '$($matchingZip.Name)': $($_.Exception.Message)" -Sub -Severity ERROR -ToConsole
+                    Write-log "Failed to download/update existing ZIP '$($matchingZip.Name)': $($_.Exception.Message)" -Sub -Severity ERROR -ToConsole
                     $ziperr++
                 }
                 $zipdestination = $zipLocalPath
@@ -1200,10 +1204,10 @@ process
              elseif ($matchingZips.Count -gt 1) # SEVERAL MATCHING ZIP, MERGE
              {
               #Apply conflict strategy also between ZIPs by extracting each ZIP separately then merging via plan
-              Log-Message ("Multiple ZIPs found for reference {0}. Will merge them, then add new documents." -f $refNumber) -Sub -ToConsole -Severity WARN
+              Write-log ("Multiple ZIPs found for reference {0}. Will merge them, then add new documents." -f $refNumber) -Sub -ToConsole -Severity WARN
               
               foreach ($z in $matchingZips) {
-                    Log-Message (" - Candidate ZIP: {0}" -f $z.Name) -Sub -ToConsole -Severity WARN
+                    Write-log (" - Candidate ZIP: {0}" -f $z.Name) -Sub -ToConsole -Severity WARN
                 }
               $mergeStage    = $workPaths.MergeRoot   # CHANGE alpha11/alpha12/alpha13/alpha14: keep merge staging on a very short path
               $existingZipDl = Join-Path -Path $workPaths.JobRoot -ChildPath 'ZE'   # CHANGE alpha13/alpha14: temporary area for downloaded duplicate ZIPs; keep separate from final ZipRoot so cleanup does not delete the final ZIP
@@ -1219,7 +1223,7 @@ process
                     $zipExtract = Join-Path -Path $existingZipDl -ChildPath ("X{0:D2}" -f $zipCounter)
 
                     try {
-                        Log-Message ("Downloading ZIP for merge: {0}" -f $z.Name) -Sub -ToConsole -Severity INFO
+                        Write-log ("Downloading ZIP for merge: {0}" -f $z.Name) -Sub -ToConsole -Severity INFO
                         Get-PnPFile -ServerRelativeUrl "$serverRelativeSubRoot/$($z.Name)" `
                                     -Path $existingZipDl `
                                     -FileName $($z.Name) `
@@ -1229,7 +1233,7 @@ process
                         if (Test-Path -LiteralPath $zipExtract) { Remove-Item -LiteralPath $zipExtract -Recurse -Force -ErrorAction SilentlyContinue }
                         New-Item -ItemType Directory -Path $zipExtract -Force | Out-Null
 
-                        Log-Message ("Extracting {0} into {1}" -f $z.Name,$zipExtract) -Sub -ToConsole -Severity INFO
+                        Write-log ("Extracting {0} into {1}" -f $z.Name,$zipExtract) -Sub -ToConsole -Severity INFO
                         Expand-Archive -LiteralPath $localZip -DestinationPath $zipExtract -Force
 
                         # CHANGE alpha14: normalize each extracted ZIP before merge so folder structure stays inside one top-level container
@@ -1243,7 +1247,7 @@ process
                         Merge-LocalFolderContents -SourceRoot $zipInfo.ContentRoot -TargetRoot $canonicalRoot -Mode $ConflictMode -LogPrefix ("[ZIP:{0}] " -f $z.Name) | Out-Null
 
                     } catch {
-                        Log-Message ("Failed to download/extract/merge {0}: {1}" -f $z.Name,$_.Exception.Message) -Sub -Severity ERROR -ToConsole
+                        Write-log ("Failed to download/extract/merge {0}: {1}" -f $z.Name,$_.Exception.Message) -Sub -Severity ERROR -ToConsole
                         $ziperr++
                     } finally {
                         if (Test-Path -LiteralPath $zipExtract) { Remove-Item -LiteralPath $zipExtract -Recurse -Force -ErrorAction SilentlyContinue }
@@ -1261,7 +1265,7 @@ process
                     Merge-LocalFolderContents -SourceRoot $sourceInfo.ContentRoot -TargetRoot $canonicalRoot -Mode $ConflictMode -LogPrefix "[NewDocs] " | Out-Null
                 }
               catch {
-                    Log-Message ("Failed to merge new documents into staging: {0}" -f $_.Exception.Message) -Sub -Severity ERROR -ToConsole
+                    Write-log ("Failed to merge new documents into staging: {0}" -f $_.Exception.Message) -Sub -Severity ERROR -ToConsole
                     $ziperr++
                 }
 
@@ -1269,7 +1273,7 @@ process
 
               try {
                     if (Test-Path -LiteralPath $zipdestination) { Remove-Item -LiteralPath $zipdestination -Force -ErrorAction SilentlyContinue }
-                    Log-Message ("Creating merged ZIP {0} from staging {1}" -f $canonicalZipName,$mergeStage) -Sub -ToConsole -Severity INFO
+                    Write-log ("Creating merged ZIP {0} from staging {1}" -f $canonicalZipName,$mergeStage) -Sub -ToConsole -Severity INFO
                     Compress-Archive -Path (Join-Path $mergeStage '*') -DestinationPath $zipdestination -Force
 
                     $mergedCount = $null
@@ -1280,23 +1284,23 @@ process
                     } finally {
                         if ($ZipFile) { $ZipFile.Dispose() }
                     }
-                    Log-Message ("Merged ZIP created: {0} now holds {1} files" -f $canonicalZipName,$mergedCount) -Sub -ToConsole -Severity INFO
+                    Write-log ("Merged ZIP created: {0} now holds {1} files" -f $canonicalZipName,$mergedCount) -Sub -ToConsole -Severity INFO
 
                 }
               catch {
-                    Log-Message ("Failed to create merged ZIP: {0}" -f $_.Exception.Message) -Sub -Severity ERROR -ToConsole
+                    Write-log ("Failed to create merged ZIP: {0}" -f $_.Exception.Message) -Sub -Severity ERROR -ToConsole
                     $ziperr++
                 }
 
               if ($ziperr -eq 0) {
                     $dupes = $matchingZips | Where-Object { $_.Name -ne $canonicalZipName }
                     foreach ($d in $dupes) {
-                        Log-Message ("Deleting duplicate ZIP on SharePoint (post-merge): {0}" -f $d.Name) -Sub -ToConsole -Severity WARN
+                        Write-log ("Deleting duplicate ZIP on SharePoint (post-merge): {0}" -f $d.Name) -Sub -ToConsole -Severity WARN
                         if ($PSCmdlet.ShouldProcess("ZIP: $serverRelativeSubRoot/$($d.Name)","Remove-PnPFile (duplicate zip)")) {
                             try {
                                 Remove-PnPFile -ServerRelativeUrl "$serverRelativeSubRoot/$($d.Name)" -Force -Connection $ActiveConnection
                             } catch {
-                                Log-Message ("Failed to delete duplicate ZIP {0}: {1}" -f $d.Name,$_.Exception.Message) -Sub -ToConsole -Severity WARN
+                                Write-log ("Failed to delete duplicate ZIP {0}: {1}" -f $d.Name,$_.Exception.Message) -Sub -ToConsole -Severity WARN
                             }
                         }
                     }
@@ -1310,9 +1314,9 @@ process
             }
              else  # NO MATCHING ZIP, FIRST TIME COMPRESSION
              {
-              Log-Message "No matching ZIP found for reference $refNumber" -Sub -Severity INFO -ToConsole
+              Write-log "No matching ZIP found for reference $refNumber" -Sub -Severity INFO -ToConsole
               $zipdestination = Join-Path -Path $workPaths.ZipRoot -ChildPath "$($subitem.Name).zip"   # CHANGE alpha11/alpha12/alpha13/alpha14: create the new ZIP in the short ZIP work area
-              Log-Message "Creating $zipdestination" -Sub -Severity INFO -ToConsole
+              Write-log "Creating $zipdestination" -Sub -Severity INFO -ToConsole
               try {
                     Compress-Archive -Path (Join-Path $zipsourcefolder '*') -DestinationPath $zipdestination -Force
                     $countNew = $null
@@ -1323,11 +1327,11 @@ process
                     } finally {
                         if ($ZipFile) { $ZipFile.Dispose() }
                     }
-                    Log-Message "Created new ZIP. File holds $countNew files" -Sub -Severity INFO -ToConsole
+                    Write-log "Created new ZIP. File holds $countNew files" -Sub -Severity INFO -ToConsole
                 }
               catch
                {
-                Log-Message "Failed to create new ZIP: $($_.Exception.Message)" -Sub -Severity ERROR -ToConsole
+                Write-log "Failed to create new ZIP: $($_.Exception.Message)" -Sub -Severity ERROR -ToConsole
                 $ziperr++
                 }
                if ($ziperr -eq 0)
@@ -1344,7 +1348,7 @@ process
              $zipFileName = Split-Path -Leaf $zipdestination
              $zipServerRelativeUrl = "$serverRelativeSubRoot/$zipFileName"   # CHANGE alpha12/alpha13/alpha14: use the actual final ZIP name for checkout/checkin/upload
              #ZIP-centric upload log (ZIP is the entity; folder is the source input)
-             Log-Message ("[REF {0}] Uploading merged ZIP {1} to {2} (source folder: {3})" -f $refNumber,$zipFileName,$serverRelativeSubRoot,$subitem.Name) -Sub -Severity INFO -ToConsole
+             Write-log ("[REF {0}] Uploading merged ZIP {1} to {2} (source folder: {3})" -f $refNumber,$zipFileName,$serverRelativeSubRoot,$subitem.Name) -Sub -Severity INFO -ToConsole
 
              # If file already exists, try to checkout (ignore errors if not existing)
              try
@@ -1364,8 +1368,8 @@ process
 
              # Delete original folder (if allowed) with WhatIf support
              $FolderToDelete = Get-PnPFolder -Url $subitemUrl -Connection $ActiveConnection
-             Log-Message ("[REF {0}] Deleting source folder after successful archive: {1}" -f $refNumber,$FolderToDelete.Name) -Sub -Severity INFO -ToConsole  # 1805 CHANGE
-             Delete-PnPFolderRecursive -Folder $FolderToDelete -ActiveConnection $ActiveConnection
+             Write-log ("[REF {0}] Deleting source folder after successful archive: {1}" -f $refNumber,$FolderToDelete.Name) -Sub -Severity INFO -ToConsole  # 1805 CHANGE
+             Remove-PnPFolderRecursive -Folder $FolderToDelete -ActiveConnection $ActiveConnection
 
              # finally delete the subitem itself
              $parentFolderForRemove = $subrooturl.TrimStart("/")
@@ -1384,12 +1388,12 @@ process
         {
          $logDestSiteRel = "$subrooturl/$LogFolderName"
          $logDestFolder = Get-PnPFolder -Url $logDestSiteRel -Connection $ActiveConnection
-         Log-Message "Uploading compression log $sublogfile to $($logDestFolder.ServerRelativeUrl)" -Severity INFO -ToConsole  # 1805 CHANGE
+         Write-log "Uploading compression log $sublogfile to $($logDestFolder.ServerRelativeUrl)" -Severity INFO -ToConsole  # 1805 CHANGE
          Add-PnPFile -Path $subLogPath -Folder $logDestSiteRel.TrimStart("/") -Connection $ActiveConnection | Out-Null
         }
        catch
         {
-         Log-Message "Failed to upload compression log $sublogfile : $($_.Exception.Message)" -Severity WARN -ToConsole
+         Write-log "Failed to upload compression log $sublogfile : $($_.Exception.Message)" -Severity WARN -ToConsole
         }
       }
 
@@ -1400,16 +1404,14 @@ process
 end
 
 {
- 
-# Clean this run's temporary folder
-    
+# Clean this run's temporary folder 
 if (Test-Path -LiteralPath $RunTemp)
- {
+{
   try
   {
    Get-ChildItem $RunTemp -Force | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
    Remove-Item $RunTemp -Force -ErrorAction SilentlyContinue
   } catch { }
- }
+}
     Write-Host "Execution complete"
 }
