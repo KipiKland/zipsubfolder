@@ -17,11 +17,19 @@
 
 .CHANGELOG
 
-    1802alpha19 WISH LIST
-     - Create Temp folder ($TempRoot) if folder does not exist.
-     - Propose to merge duplicate folders even they are more than 2 per reference
-     - Propose to move subfolder falling outside of folder range.
+1802alpha19 WISH LIST
+  1) Create Temp folder ($TempRoot) if folder does not exist and log action.
 
+  2)When using the "D" option, on top of listing duplicates i would like to
+    Propose to merge duplicate folders even they are more than 2 per reference:
+    - There is already the necessary code present, but only when choosing a specific folder by number to parse folders
+      for compression or selecting the A option. code should be reused when using D option 
+    - There are already functions availalbe on the code for this and they shoud be reused as well.
+    see the lines and beyond:  elseif ($matchingZips.Count -gt 1) # SEVERAL MATCHING ZIP, MERGE
+
+3) When using the "C" option:
+- i also want to add the functionality to move subfolders falling outside of folder range to the proper folder identified by expected range.
+- The move should not be destructive, ie if a folder with same or different name but with same 6 digit reference exist, then move is skipped and actions logged.
      
     1802alpha18 / 17.06.2026
       - CHANGE alpha17: added menu option C to check that uncompressed folders and already-compressed ZIP files are stored in the correct 6-digit range folder.
@@ -104,7 +112,7 @@
 param(
     [Parameter()]
     [ValidateNotNullOrEmpty()]
-    [string] $ShpDomain = "https://ing.sharepoint.com",
+    [string] $ShpDomain = "https://xxx.sharepoint.com",
 
     [Parameter()]
     [ValidateNotNullOrEmpty()]
