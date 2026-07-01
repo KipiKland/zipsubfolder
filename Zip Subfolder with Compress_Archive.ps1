@@ -103,15 +103,15 @@ $scriptVersion = "1802alpha19"
     #$env:PNPPOWERSHELL_UPDATECHECK = "OFF"
 #>
 
-[CmdletBinding(SupportsShouldProcess = $true)]
+
 param(
     [Parameter()]
     [ValidateNotNullOrEmpty()]
-    [string] $ShpDomain = "https://ing.sharepoint.com",
+    [string] $ShpDomain = "https://xxx.sharepoint.com"
 
     [Parameter()]
     [ValidateNotNullOrEmpty()]
-    [string] $Site = "/sites/GRCH000062_FS", # site-relative for consistency
+    [string] $Site ="/sites/GRCH000062_FS" # site-relative for consistency
 
     [Parameter()]
     [ValidateNotNullOrEmpty()]
@@ -131,7 +131,7 @@ param(
 
     [switch] $ProcessAll,  # If set, skips the interactive prompt and processes all root folders
     [switch] $Quiet        # If set, less console output (log still complete)
-)
+    )
 
 begin {
     # ---- SETTINGS / GLOBALS ----
@@ -1140,14 +1140,12 @@ process
             $dupes = @($matchingZips | Where-Object { $_.Name -ne $canonicalZipName })
             foreach ($d in $dupes) {
                 Write-log ("Option D merge: deleting duplicate ZIP on SharePoint after successful merge: {0}" -f $d.Name) -Severity WARN -ToConsole
-                if ($PSCmdlet.ShouldProcess("ZIP: $serverRelativeSubRoot/$($d.Name)","Remove-PnPFile (duplicate zip)")) {
                     try {
                         Remove-PnPFile -ServerRelativeUrl "$serverRelativeSubRoot/$($d.Name)" -Force -Connection $Connection
                     }
                     catch {
                         Write-log ("Option D merge: failed to delete duplicate ZIP {0}: {1}" -f $d.Name,$_.Exception.Message) -Severity WARN -ToConsole
                     }
-                }
             }
         }
 
